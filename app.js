@@ -33,9 +33,9 @@ const SB = CFG.supabaseUrl && CFG.supabaseKey ? {
   del(t, id) { return this.req(`${t}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" }); },
 } : null;
 
-const S = { products: {}, recipes: {}, plan: null, goals: {}, diary: {}, person: LS.get("person", "liza"), tab: LS.get("tab", "diary"), day: today(), openRecipe: null, online: !!SB };
+const S = { products: {}, recipes: {}, plan: null, goals: {}, body: {}, diary: {}, person: LS.get("person", "liza"), tab: LS.get("tab", "diary"), day: today(), openRecipe: null, online: !!SB };
 
-function cacheSave() { LS.set("cache", { products: S.products, recipes: S.recipes, plan: S.plan, goals: S.goals }); }
+function cacheSave() { LS.set("cache", { products: S.products, recipes: S.recipes, plan: S.plan, goals: S.goals, body: S.body }); }
 async function save(table, row) {
   row.updated = new Date().toISOString();
   if (table === "products") S.products[row.id] = row;
@@ -50,7 +50,7 @@ async function remove(table, id) {
   if (SB) { try { await SB.del(table, id); } catch (e) { toast("Не удалилось на сервере: " + e.message); } }
 }
 async function saveKV(key, value) {
-  if (key === "plan") S.plan = value; if (key === "goals") S.goals = value;
+  if (key === "plan") S.plan = value; if (key === "goals") S.goals = value; if (key === "body") S.body = value;
   cacheSave();
   if (SB) { try { await SB.upsert("kv", [{ key, value, updated: new Date().toISOString() }]); } catch (e) { queue("kv", { key, value }); } }
 }
@@ -64,14 +64,14 @@ async function flushQueue() {
 
 async function load() {
   const c = LS.get("cache", null);
-  if (c) Object.assign(S, { products: c.products || {}, recipes: c.recipes || {}, plan: c.plan, goals: c.goals || {} });
+  if (c) Object.assign(S, { products: c.products || {}, recipes: c.recipes || {}, plan: c.plan, goals: c.goals || {}, body: c.body || {} });
   if (SB) {
     try {
       await flushQueue();
       const [p, r, kv] = await Promise.all([SB.all("products"), SB.all("recipes"), SB.all("kv")]);
       S.products = Object.fromEntries(p.map(x => [x.id, x]));
       S.recipes = Object.fromEntries(r.map(x => [x.id, x]));
-      for (const row of kv) { if (row.key === "plan") S.plan = row.value; if (row.key === "goals") S.goals = row.value; }
+      for (const row of kv) { if (row.key === "plan") S.plan = row.value; if (row.key === "goals") S.goals = row.value; if (row.key === "body") S.body = row.value; }
       S.online = true; cacheSave();
     } catch (e) { S.online = false; status("нет связи, показываю сохранённое"); }
   }
@@ -210,12 +210,25 @@ async function viewDiary(v) {
   const goal = S.goals?.[person];
   v.innerHTML = `<div class="card"><div class="row"><button class="btn ghost" id="dPrev" aria-label="Предыдущий день">‹</button>
     <input type="date" id="dDay" value="${day}"><button class="btn ghost" id="dNext" aria-label="Следующий день">›</button>
-    <span class="grow"></span><button class="btn ghost small" id="dGoal">Цели</button></div><div id="dSum" style="margin-top:12px"></div></div>
+    <span class="grow"></span><button class="btn ghost small" id="dGoal">Цели</button></div><div id="dSum" style="margin-top:12px"></div>
+    <div class="row" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+      <label class="small muted row">Вес <input type="number" step="0.1" inputmode="decimal" id="bKg" style="width:80px" value="${S.body?.[person]?.[day]?.kg ?? ""}"> кг</label>
+      <input id="bAct" class="grow" placeholder="Активность: прогулка 40 мин, бассейн…" value="${esc(S.body?.[person]?.[day]?.act ?? "")}">
+    </div><div class="small muted" id="bLast"></div></div>
     <div id="dMeals" style="display:flex;flex-direction:column;gap:12px"></div>`;
   const shift = d => { const x = new Date(S.day); x.setDate(x.getDate() + d); S.day = x.toISOString().slice(0, 10); render(); };
   $("#dPrev").onclick = () => shift(-1); $("#dNext").onclick = () => shift(1);
   $("#dDay").onchange = e => { S.day = e.target.value || today(); render(); };
   $("#dGoal").onclick = editGoals;
+  const saveBody = () => {
+    const b = JSON.parse(JSON.stringify(S.body || {})); const p = (b[person] = b[person] || {});
+    const kg = n($("#bKg").value), act = $("#bAct").value.trim();
+    if (kg == null && !act) delete p[day]; else p[day] = { ...(kg != null ? { kg } : {}), ...(act ? { act } : {}) };
+    saveKV("body", b); toast("Сохранено");
+  };
+  $("#bKg").onchange = saveBody; $("#bAct").onchange = saveBody;
+  const hist = Object.entries(S.body?.[person] || {}).filter(([d, x]) => x.kg != null && d < day).sort().slice(-1)[0];
+  if (hist) $("#bLast").textContent = `Последнее взвешивание: ${hist[1].kg} кг (${hist[0].split("-").reverse().join(".")})`;
   const entries = await loadDiary(person, day);
   if (S.tab !== "diary" || S.person !== person || S.day !== day) return;
   const tot = { kcal: 0, p: 0, f: 0, c: 0 }; for (const e of entries) for (const k of KEYS) tot[k] += +e[k] || 0;
@@ -225,7 +238,7 @@ async function viewDiary(v) {
       ${g ? `<div class="bar ${tot[k] > g * 1.05 ? "over" : ""}"><i style="width:${pct}%"></i></div><div class="t">${tot[k] <= g ? "осталось " + r0(g - tot[k]) : "больше на " + r0(tot[k] - g)}</div>` : ""}</div>`;
   };
   $("#dSum").innerHTML = `<div class="goals">${cell("kcal", "Калории", "k")}${cell("p", "Белки, г", "b")}${cell("f", "Жиры, г", "j")}${cell("c", "Углеводы, г", "u")}</div>
-    ${goal ? "" : `<div class="small muted" style="margin-top:8px">Цели для ${pname(person)} не заданы — нажмите «Цели».</div>`}`;
+    ${goal ? "" : `<div class="small muted" style="margin-top:8px">Цели не заданы — нажмите «Цели».</div>`}`;
   $("#dMeals").innerHTML = Object.entries(MEALS).map(([m, t]) => {
     const list = entries.filter(e => e.meal === m);
     const s = { kcal: 0 }; list.forEach(e => s.kcal += +e.kcal || 0);
