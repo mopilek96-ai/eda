@@ -660,6 +660,27 @@ function editProduct(p, isNew) {
   });
 }
 
+/* ---------- кнопка «Обновить» ---------- */
+async function hardRefresh() {
+  const b = $("#refresh"); b.disabled = true; b.textContent = "…";
+  try {
+    // новая версия сайта? — сравниваем ссылку на app.js в свежем index.html
+    const html = await fetch("index.html?x=" + Date.now(), { cache: "no-store" }).then(r => r.text());
+    const fresh = (html.match(/app\.js\?v=([0-9a-f]+)/) || [])[1];
+    const mine = (document.querySelector('script[src^="app.js"]')?.getAttribute("src").match(/v=([0-9a-f]+)/) || [])[1];
+    if (fresh && fresh !== mine) {
+      if (window.caches) for (const k of await caches.keys()) await caches.delete(k);
+      const reg = await navigator.serviceWorker?.getRegistration(); await reg?.update();
+      toast("Есть новая версия — перезагружаю"); setTimeout(() => location.reload(), 600); return;
+    }
+    await flushQueue();
+    S.diary = {};
+    await load(); render(); toast(S.online ? "Данные обновлены" : "Нет связи с сервером");
+  } catch (e) { toast("Не получилось: " + e.message); }
+  b.disabled = false; b.textContent = "⟳";
+}
+document.addEventListener("click", e => { if (e.target.closest("#refresh")) hardRefresh(); });
+
 /* ---------- старт ---------- */
 (async function start() {
   renderChrome(); $("#view").innerHTML = `<div class="empty">Загружаю…</div>`;
