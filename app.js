@@ -665,7 +665,7 @@ function editProduct(p, isNew) {
   renderChrome(); $("#view").innerHTML = `<div class="empty">Загружаю…</div>`;
   await load(); render();
   if (!SB) status("без сервера: данные только в этом браузере");
-  if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => { });
+  if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(r => r.update()).catch(() => { });
   window.addEventListener("online", () => { flushQueue(); status(""); });
   window.addEventListener("offline", () => status("нет сети"));
 })();
