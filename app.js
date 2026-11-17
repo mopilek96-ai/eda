@@ -106,6 +106,33 @@ async function addDiary(entry) {
   LS.set("diary:" + key, S.diary[key]);
   if (SB) { try { await SB.upsert("diary", [entry]); } catch (e) { queue("diary", entry); toast("Сохранено на телефоне, отправлю позже"); } }
 }
+async function updDiary(entry) {
+  const key = entry.person + "|" + entry.day;
+  S.diary[key] = (S.diary[key] || []).map(x => x.id === entry.id ? entry : x);
+  LS.set("diary:" + key, S.diary[key]);
+  if (SB) { try { await SB.upsert("diary", [entry]); } catch (e) { queue("diary", entry); toast("Сохранено на телефоне, отправлю позже"); } }
+}
+function editDiary(e) {
+  const unit = e.unit === "pcs" ? "шт" : "г";
+  const per = e.amount ? { kcal: e.kcal / e.amount, p: e.p / e.amount, f: e.f / e.amount, c: e.c / e.amount } : null; // на 1 г / 1 шт
+  openDialog(`<div class="dh"><h2>Изменить запись</h2><button class="btn ghost" data-close>✕</button></div><div class="db">
+    <label class="f">Название<input id="eTitle" value="${esc(e.title)}"></label>
+    <div class="row"><label class="f">Сколько, ${unit}<input type="number" inputmode="decimal" id="eAmt" value="${e.amount ?? ""}"></label>
+      <label class="f">Приём пищи<select id="eMeal">${Object.entries(MEALS).map(([k, t]) => `<option value="${k}" ${e.meal === k ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <label class="f">Дата<input type="date" id="eDay" value="${e.day}"></label></div>
+    <div class="small muted">КБЖУ записи (пересчитываются при смене количества; можно поправить вручную):</div>
+    <div class="grid4">${KEYS.map((k, i) => `<label class="f">${["Ккал", "Белки", "Жиры", "Углеводы"][i]}<input type="number" inputmode="decimal" data-e="${k}" value="${Math.round((+e[k] || 0) * 10) / 10}"></label>`).join("")}</div>
+  </div><div class="df"><button class="btn danger" id="eDel">Удалить</button><span class="grow"></span><button class="btn" data-close>Отмена</button><button class="btn primary" id="eSave">Сохранить</button></div>`, d => {
+    $("#eAmt", d).oninput = ev => { const a = n(ev.target.value); if (!per || a == null) return; KEYS.forEach(k => d.querySelector(`[data-e="${k}"]`).value = Math.round(per[k] * a * 10) / 10); };
+    $("#eDel", d).onclick = async () => { await delDiary(e); d.close(); render(); };
+    $("#eSave", d).onclick = async () => {
+      const out = { ...e, title: $("#eTitle", d).value.trim() || e.title, amount: n($("#eAmt", d).value) ?? e.amount, meal: $("#eMeal", d).value, day: $("#eDay", d).value || e.day };
+      KEYS.forEach(k => out[k] = n(d.querySelector(`[data-e="${k}"]`).value) ?? 0);
+      if (out.day !== e.day) { await delDiary(e); await addDiary(out); } else await updDiary(out);
+      d.close(); toast("Изменено"); render();
+    };
+  });
+}
 async function delDiary(entry) {
   const key = entry.person + "|" + entry.day;
   S.diary[key] = (S.diary[key] || []).filter(x => x.id !== entry.id);
@@ -244,12 +271,13 @@ async function viewDiary(v) {
     const s = { kcal: 0 }; list.forEach(e => s.kcal += +e.kcal || 0);
     return `<div class="card"><div class="row"><h2 class="grow">${t}</h2><span class="muted small num">${list.length ? r0(s.kcal) + " ккал" : ""}</span>
       <button class="btn primary" data-add="${m}">+ Добавить</button></div>
-      <div class="list" style="margin-top:6px">${list.map(e => `<div class="li"><div class="grow"><div class="t">${esc(e.title)}</div>
+      <div class="list" style="margin-top:6px">${list.map(e => `<div class="li"><div class="grow" data-edit="${e.id}" style="cursor:pointer" title="Изменить"><div class="t">${esc(e.title)} <span class="muted small">✎</span></div>
         <div class="s num">${r0(e.amount)} ${e.unit === "pcs" ? "шт" : "г"} · ${r0(e.kcal)} ккал · Б ${r1(e.p)} Ж ${r1(e.f)} У ${r1(e.c)} ${srcTag(e.src)}</div></div>
         <button class="btn ghost" data-del="${e.id}" aria-label="Удалить">✕</button></div>`).join("") || `<div class="empty">Пока пусто</div>`}</div></div>`;
   }).join("") + `<button class="btn" id="dCopy">Скопировать записи из вчерашнего дня</button>`;
   v.querySelectorAll("[data-add]").forEach(b => b.onclick = () => addEntryDialog(b.dataset.add));
   v.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { const e = entries.find(x => x.id === b.dataset.del); await delDiary(e); render(); });
+  v.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editDiary(entries.find(x => x.id === b.dataset.edit)));
   $("#dCopy").onclick = async () => {
     const y = new Date(day); y.setDate(y.getDate() - 1); const yd = y.toISOString().slice(0, 10);
     const prev = await loadDiary(person, yd);
