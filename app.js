@@ -274,17 +274,47 @@ async function viewDiary(v) {
       <div class="list" style="margin-top:6px">${list.map(e => `<div class="li"><div class="grow" data-edit="${e.id}" style="cursor:pointer" title="Изменить"><div class="t">${esc(e.title)} <span class="muted small">✎</span></div>
         <div class="s num">${r0(e.amount)} ${e.unit === "pcs" ? "шт" : "г"} · ${r0(e.kcal)} ккал · Б ${r1(e.p)} Ж ${r1(e.f)} У ${r1(e.c)} ${srcTag(e.src)}</div></div>
         <button class="btn ghost" data-del="${e.id}" aria-label="Удалить">✕</button></div>`).join("") || `<div class="empty">Пока пусто</div>`}</div></div>`;
-  }).join("") + `<button class="btn" id="dCopy">Скопировать записи из вчерашнего дня</button>`;
+  }).join("") + `<button class="btn" id="dCopy">↺ Добавить из вчера…</button>`;
   v.querySelectorAll("[data-add]").forEach(b => b.onclick = () => addEntryDialog(b.dataset.add));
   v.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { const e = entries.find(x => x.id === b.dataset.del); await delDiary(e); render(); });
   v.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editDiary(entries.find(x => x.id === b.dataset.edit)));
-  $("#dCopy").onclick = async () => {
-    const y = new Date(day); y.setDate(y.getDate() - 1); const yd = y.toISOString().slice(0, 10);
-    const prev = await loadDiary(person, yd);
-    if (!prev.length) return toast("Вчера записей нет");
-    for (const e of prev) await addDiary({ ...e, id: undefined, created: undefined, day });
-    toast("Скопировано: " + prev.length); render();
+  $("#dCopy").onclick = () => copyDialog(person, day);
+}
+async function copyDialog(person, day) {
+  const y = new Date(day); y.setDate(y.getDate() - 1);
+  let from = y.toISOString().slice(0, 10);
+  const d = openDialog(`<div class="dh"><h2>Добавить из другого дня</h2><button class="btn ghost" data-close>✕</button></div>
+    <div class="db"><label class="f">Откуда<input type="date" id="cFrom" value="${from}"></label><div id="cList" class="list"></div></div>
+    <div class="df"><span class="small muted grow" id="cSum"></span><button class="btn" data-close>Отмена</button><button class="btn primary" id="cAdd">Добавить</button></div>`);
+  let rows = [];
+  const sum = () => {
+    let k = 0, c = 0;
+    d.querySelectorAll("[data-ci]").forEach(cb => { if (!cb.checked) return; const e = rows[+cb.dataset.ci]; const a = n(d.querySelector(`[data-ca="${cb.dataset.ci}"]`).value) || 0; k += e.amount ? e.kcal * a / e.amount : e.kcal; c++; });
+    $("#cSum", d).textContent = c ? `выбрано: ${c} · ${r0(k)} ккал` : "ничего не выбрано"; $("#cAdd", d).disabled = !c;
   };
+  const draw = async () => {
+    $("#cList", d).innerHTML = `<div class="empty">Загружаю…</div>`;
+    rows = await loadDiary(person, from);
+    $("#cList", d).innerHTML = rows.length ? rows.map((e, i) => `<div class="li" style="flex-wrap:wrap">
+        <input type="checkbox" data-ci="${i}" checked style="width:20px;height:20px;accent-color:var(--accent)">
+        <div class="grow" style="min-width:150px"><div class="t">${esc(e.title)}</div><div class="s num">${r0(e.kcal)} ккал · ${MEALS[e.meal] || ""}</div></div>
+        <input type="number" inputmode="decimal" data-ca="${i}" value="${e.amount ?? ""}" style="width:72px" aria-label="Количество"><span class="small muted">${e.unit === "pcs" ? "шт" : "г"}</span>
+        <select data-cm="${i}" aria-label="Куда">${Object.entries(MEALS).map(([k, t]) => `<option value="${k}" ${e.meal === k ? "selected" : ""}>${t}</option>`).join("")}</select></div>`).join("")
+      : `<div class="empty">В этот день записей нет</div>`;
+    d.querySelectorAll("[data-ci],[data-ca]").forEach(x => x.oninput = sum); sum();
+  };
+  $("#cFrom", d).onchange = e => { from = e.target.value; draw(); };
+  $("#cAdd", d).onclick = async () => {
+    let c = 0;
+    for (const cb of d.querySelectorAll("[data-ci]")) {
+      if (!cb.checked) continue; const i = +cb.dataset.ci, e = rows[i];
+      const a = n(d.querySelector(`[data-ca="${i}"]`).value) || e.amount; const k = e.amount ? a / e.amount : 1;
+      await addDiary({ ...e, id: undefined, created: undefined, day, meal: d.querySelector(`[data-cm="${i}"]`).value, amount: a, kcal: e.kcal * k, p: e.p * k, f: e.f * k, c: e.c * k });
+      c++;
+    }
+    d.close(); toast("Добавлено: " + c); render();
+  };
+  draw();
 }
 function srcTag(s) { const m = { recipe: "рецепт", product: "продукт", label: "этикетка", ai: "ИИ-оценка", off: "Open Food Facts", manual: "вручную" }; return s ? `<span class="tag ${s === "ai" ? "warn" : ""}">${m[s] || s}</span>` : ""; }
 
@@ -310,6 +340,22 @@ function searchAll(q) {
   const ps = Object.values(S.products).filter(p => hit(p.name)).map(p => ({ type: "product", p }));
   return [...rs, ...ps].slice(0, 40);
 }
+// Последние 5 разных блюд, которые вносил этот человек
+async function recentEntries(person) {
+  let rows = [];
+  if (SB) { try { rows = await SB.all("diary", `&person=eq.${person}&order=created.desc&limit=60`); } catch { } }
+  if (!rows.length) rows = Object.entries(S.diary).filter(([k]) => k.startsWith(person + "|")).flatMap(([, v]) => v).sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const seen = new Set(), out = [];
+  for (const e of rows) { const k = norm(e.title); if (seen.has(k)) continue; seen.add(k); out.push(e); if (out.length >= 5) break; }
+  return out;
+}
+function recentSource(e) {
+  if (e.src === "recipe" && S.recipes[e.ref]) return { recipe: S.recipes[e.ref], amount: e.amount };
+  if (e.src === "product" && S.products[e.ref]) return { product: S.products[e.ref], amount: e.amount };
+  if (e.ref && S.products[e.ref]) return { product: S.products[e.ref], amount: e.amount };
+  const k = e.amount ? (e.unit === "pcs" ? 1 / e.amount : 100 / e.amount) : 1;
+  return { manual: { name: e.title, kcal: Math.round(e.kcal * k * 10) / 10, p: Math.round(e.p * k * 10) / 10, f: Math.round(e.f * k * 10) / 10, c: Math.round(e.c * k * 10) / 10, portion_g: e.amount, unit: e.unit, src: e.src || "manual", again: true } };
+}
 function planRecipes() { return (S.plan?.items || []).map(i => S.recipes[i.rid]).filter(Boolean); }
 
 function addEntryDialog(meal) {
@@ -318,6 +364,7 @@ function addEntryDialog(meal) {
   const d = openDialog(`<div class="dh"><h2>${MEALS[meal]} · ${pname(person)}</h2><button class="btn ghost" data-close>✕</button></div>
     <div class="db" id="aBody">
       ${quick.length ? `<div><h3>Из меню недели</h3><div class="chips" style="margin-top:6px">${quick.map(r => `<button class="chip" data-q="${r.id}">${esc(r.title)}</button>`).join("")}</div></div>` : ""}
+      <div id="aRecent"></div>
       <input type="search" id="aQ" placeholder="Поиск: блюдо или продукт" autocomplete="off">
       <div class="res" id="aRes"></div>
       <div class="row" id="aMore">
@@ -340,6 +387,11 @@ function addEntryDialog(meal) {
       const o = res.querySelector("[data-off]"); if (o) o.onclick = () => offSearch(d, meal, q.value.trim());
     };
     q.oninput = draw;
+    recentEntries(person).then(list => {
+      if (!list.length || !d.open) return;
+      $("#aRecent", d).innerHTML = `<h3>Недавние</h3><div class="res" style="margin-top:4px">${list.map((e, i) => `<button data-r="${i}"><span>🕘 ${esc(e.title)}</span><span class="muted small num">${r0(e.amount)} ${e.unit === "pcs" ? "шт" : "г"} · ${r0(e.kcal)} ккал</span></button>`).join("")}</div>`;
+      $("#aRecent", d).querySelectorAll("[data-r]").forEach(b => b.onclick = () => amountStep(d, meal, recentSource(list[+b.dataset.r])));
+    });
     d.querySelectorAll("[data-q]").forEach(b => b.onclick = () => amountStep(d, meal, { recipe: S.recipes[b.dataset.q] }));
     $("#aManual", d).onclick = () => amountStep(d, meal, { manual: { name: q.value.trim(), kcal: "", p: "", f: "", c: "" } });
     $("#aPhoto", d).onclick = () => $("#aFile", d).click();
@@ -357,12 +409,13 @@ function amountStep(d, meal, src) {
     if (c.errors.length) note = `В рецепте не посчитано: ${c.errors.map(x => esc(x.it.name)).join(", ")}. Цифры занижены.`;
     if (c.noCooked) note += (note ? " " : "") + "Вес готового блюда не указан — считаю по сумме сырых продуктов.";
   } else if (src.product) { title = src.product.name; per = per100OfProduct(src.product); }
-  else { const m = src.manual; title = m.name; per = m.kcal !== "" ? { kcal: n(m.kcal), p: n(m.p) || 0, f: n(m.f) || 0, c: n(m.c) || 0 } : null; defAmt = m.portion_g || 100; note = m.note || ""; isNew = true; }
+  else { const m = src.manual; title = m.name; per = m.kcal !== "" ? { kcal: n(m.kcal), p: n(m.p) || 0, f: n(m.f) || 0, c: n(m.c) || 0 } : null; defAmt = m.portion_g || 100; note = m.note || ""; isNew = true; if (m.unit === "pcs") unit = "pcs"; }
+  if (src.amount) defAmt = src.amount;
   const body = $(".db", d);
   body.innerHTML = `<div><b>${esc(title || "Новая запись")}</b> ${src.recipe ? srcTag("recipe") : src.product ? srcTag("product") : srcTag(src.manual.src || "manual")}</div>
     ${note ? `<div class="notice">${note}</div>` : ""}
     ${isNew ? `<label class="f">Название<input id="mName" value="${esc(title)}"></label>
-      <div class="small muted">КБЖУ на 100 г:</div>
+      <div class="small muted">КБЖУ ${unit === "pcs" ? "на 1 шт" : "на 100 г"}:</div>
       <div class="grid4">${KEYS.map((k, i) => `<label class="f">${["Ккал", "Белки", "Жиры", "Углеводы"][i]}<input type="number" inputmode="decimal" data-m="${k}" value="${per?.[k] ?? ""}"></label>`).join("")}</div>` :
       `<div class="small muted">${unit === "pcs" ? "На 1 шт:" : "На 100 г:"}</div>${kbju(per)}`}
     <label class="f">${unit === "pcs" ? "Сколько штук" : "Сколько грамм"}<input type="number" inputmode="decimal" id="mAmt" value="${defAmt}"></label>
