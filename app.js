@@ -3,7 +3,8 @@
 const CFG = window.EDA_CONFIG || {};
 const PEOPLE = [{ id: "liza", name: "Лиза" }, { id: "oleg", name: "Олег" }];
 const MEALS = { breakfast: "Завтрак", lunch: "Обед", dinner: "Ужин", snack: "Перекус" };
-const RMEALS = { breakfast: "Завтраки", lunch: "Обеды", dinner: "Ужины", other: "Другое" };
+const RMEALS = { trial: "На пробу", breakfast: "Завтраки", lunch: "Обеды", dinner: "Ужины", other: "Другое" };
+const RORDER = ["trial", "breakfast", "lunch", "dinner", "other"];
 const CATS = ["Овощи и фрукты", "Мясо и рыба", "Молочные продукты", "Яйца", "Крупы и бакалея", "Консервы и соусы", "Заморозка", "Прочее"];
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -161,11 +162,12 @@ function calcRecipe(r, depth = 0) {
   const rows = (r.items || []).map(it => {
     const prod = itemProduct(it);
     const g = n(it.g) || 0;
-    const per100 = per100OfProduct(prod, depth);
+    const inline = !prod && it.kcal != null && it.kcal !== "" ? { kcal: +it.kcal, p: +it.p || 0, f: +it.f || 0, c: +it.c || 0 } : null;
+    const per100 = inline || per100OfProduct(prod, depth);
     let err = null;
-    if (!prod) err = "нет в базе продуктов";
+    if (!prod && !inline) err = "нет в базе продуктов";
     else if (!per100) err = prod.recipe_id ? "не посчитан рецепт-основа" : "нет КБЖУ";
-    return { it, prod, g, per100, dish: per100 ? mul(per100, g / 100) : null, err };
+    return { it, prod, g, per100, inline: !!inline, dish: per100 ? mul(per100, g / 100) : null, err };
   });
   const total = { kcal: 0, p: 0, f: 0, c: 0 };
   for (const row of rows) if (row.dish) for (const k of KEYS) total[k] += row.dish[k];
@@ -196,7 +198,7 @@ function rawIngredients(r, factor, out, depth = 0) {
       if (c.yieldW) { rawIngredients(base, g / c.yieldW, out, depth + 1); continue; }
     }
     const key = p ? p.id : "name:" + it.name;
-    const o = out[key] || (out[key] = { key, name: p ? p.name : it.name, cat: p?.cat || "Прочее", g: 0, from: new Set() });
+    const o = out[key] || (out[key] = { key, name: p ? p.name : it.name, cat: p?.cat || it.cat || "Прочее", g: 0, from: new Set() });
     o.g += g; o.from.add(r.title);
   }
   return out;
@@ -506,9 +508,10 @@ function viewWeek(v) {
   const plan = S.plan;
   v.innerHTML = `<div class="card"><div class="row"><h2 class="grow">Меню на неделю</h2><button class="btn danger" id="wClear">Новая неделя</button></div>
     <p class="small muted" style="margin:6px 0 0">Выберите блюда. «×» — сколько раз готовите это блюдо за неделю (×1 = одна закладка по рецепту, ×1,5 — в полтора раза больше). Список покупок соберётся сам.</p></div>
-    ${["breakfast", "lunch", "dinner", "other"].map(m => {
+    ${RORDER.map(m => {
       const items = plan.items.filter(i => (S.recipes[i.rid]?.meal || "other") === m);
       if (m === "other" && !items.length) return "";
+      if (m === "trial" && !items.length && !Object.values(S.recipes).some(r => r.meal === "trial")) return "";
       const opts = Object.values(S.recipes).filter(r => r.meal === m).sort((a, b) => (a.sort ?? 999) - (b.sort ?? 999));
       return `<div class="card plan-meal"><h2>${RMEALS[m]}</h2>
         ${items.map(i => { const r = S.recipes[i.rid]; const c = calcRecipe(r);
@@ -581,14 +584,15 @@ function viewRecipes(v) {
   const q = S.rq || "";
   const all = Object.values(S.recipes).filter(r => !q || norm(r.title).includes(norm(q)));
   v.innerHTML = `<div class="row"><input type="search" id="rq" class="grow" placeholder="Поиск рецепта" value="${esc(q)}"><button class="btn primary" id="rNew">+ Новый рецепт</button></div>
-    ${["breakfast", "lunch", "dinner", "other"].map(m => {
-      const list = all.filter(r => (r.meal || "other") === m).sort((a, b) => (a.sort ?? 999) - (b.sort ?? 999));
+    ${RORDER.map(m => {
+      const list = all.filter(r => (r.meal || "other") === m).sort((a, b) => m === "trial" ? String(b.updated || "").localeCompare(String(a.updated || "")) : (a.sort ?? 999) - (b.sort ?? 999));
       if (!list.length) return "";
-      return `<div class="card"><h2>${RMEALS[m]}</h2><div class="list" style="margin-top:4px">${list.map(r => {
+      return `<div class="card"><h2>${RMEALS[m]}</h2>${m === "trial" ? `<div class="small muted">Рецепты из тиктоков, которые ещё не пробовали. Попробовали — откройте рецепт и перенесите в завтраки, обеды или ужины.</div>` : ""}<div class="list" style="margin-top:4px">${list.map(r => {
         const c = calcRecipe(r);
         const bad = c.errors.length ? `<span class="tag warn">нет данных: ${c.errors.length}</span>` : "";
         const nc = c.noCooked ? `<span class="tag warn">нет веса готового</span>` : "";
-        return `<div class="li" style="cursor:pointer" data-open="${r.id}"><div class="grow"><div class="t">${esc(r.title)} ${bad} ${nc}</div>
+        const vid = m === "trial" && r.url ? `<a class="tag" href="${esc(r.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">▶ ролик</a>` : "";
+        return `<div class="li" style="cursor:pointer" data-open="${r.id}"><div class="grow"><div class="t">${esc(r.title)} ${vid} ${bad} ${nc}</div>
           <div class="s num">${c.pcs ? `1 шт: ${r0(c.perPiece?.kcal)} ккал` : `100 г: ${r0(c.per100?.kcal)} ккал`} ${PEOPLE.map(p => c.portions[p.id] ? ` · ${p.name}: ${r0(c.portions[p.id].v?.kcal)} ккал` : "").join("")}</div></div><span class="muted">›</span></div>`;
       }).join("")}</div></div>`;
     }).join("")}`;
@@ -615,13 +619,17 @@ function viewRecipe(v, r0rec) {
           <input id="rUrl" class="grow" placeholder="Ссылка на рецепт" value="${esc(r.url || "")}">${r.url ? `<a class="btn" href="${esc(r.url)}" target="_blank" rel="noopener">↗</a>` : ""}</div>
         ${c.errors.length ? `<div class="notice">Не посчитано: ${c.errors.map(x => `«${esc(x.it.name)}» — ${x.err}`).join("; ")}. Итог без них.</div>` : ""}
         ${c.noCooked ? `<div class="notice">Вес готового блюда не указан — «в 100 г» считается по сумме сырых продуктов (${r0(c.raw)} г). Взвесьте блюдо после готовки и впишите в строку «всего на блюдо».</div>` : ""}
+        ${r.meal === "trial" ? `<div class="notice" style="background:var(--accent-soft);color:var(--ink)"><div class="row"><b class="grow">Попробовали?</b>
+          <select id="rMoveTo">${["breakfast", "lunch", "dinner", "other"].map(k => `<option value="${k}" ${(r.target || "dinner") === k ? "selected" : ""}>${RMEALS[k]}</option>`).join("")}</select>
+          <button class="btn primary" id="rTried">Попробовали → в рецепты</button></div>
+          ${c.rows.some(x => x.inline) ? `<div class="small muted" style="margin-top:6px">Продукты с пометкой «из ролика» пока не в базе — при переносе они добавятся в «Продукты» с этими КБЖУ.</div>` : ""}</div>` : ""}
         ${usedBy.length ? `<div class="small muted">Это блюдо используется как продукт: ${usedBy.map(p => "«" + esc(p.name) + "»").join(", ")} — его «в 100 г» подставляется в другие рецепты.</div>` : ""}
       </div>
       <div class="sheet-wrap"><table class="sheet sticky-first">
         <thead><tr><th rowspan="2">Продукт</th><th rowspan="2">г</th><th colspan="4">На 100 гр</th><th colspan="4">На блюдо</th><th rowspan="2"></th></tr>
           <tr><th>к</th><th>б</th><th>ж</th><th>у</th><th>к</th><th>б</th><th>ж</th><th>у</th></tr></thead>
         <tbody>${c.rows.map((row, i) => `<tr>
-          <td class="name"><input list="productNames" data-name="${i}" value="${esc(row.it.name)}" placeholder="продукт…"></td>
+          <td class="name"><input list="productNames" data-name="${i}" value="${esc(row.it.name)}" placeholder="продукт…">${row.inline ? `<span class="tag warn">из ролика</span>` : ""}</td>
           <td class="g"><input type="number" inputmode="decimal" data-g="${i}" value="${row.it.g ?? ""}"></td>
           ${row.err ? `<td class="err" colspan="8">${row.g > 0 || row.it.name ? row.err : ""}</td>` : vals(row.per100, "calc", r1) + vals(row.dish)}
           <td><button class="x" data-rmrow="${i}" aria-label="Удалить строку">✕</button></td></tr>`).join("")}
@@ -634,6 +642,7 @@ function viewRecipe(v, r0rec) {
             <td class="g"><input type="number" inputmode="decimal" data-portion="${p.id}" value="${r.portions?.[p.id] ?? ""}"></td><td colspan="4"></td>
             ${vals(c.portions[p.id]?.v)}<td></td></tr>`).join("")}
         </tbody></table></div>
+      <div class="card"><h3>Как готовить</h3><textarea id="rNote" rows="${Math.min(14, Math.max(4, (r.note || "").split("\n").length + 1))}" style="width:100%;margin-top:8px;resize:vertical" placeholder="Шаги приготовления…">${esc(r.note || "")}</textarea></div>
       <label class="row small"><input type="checkbox" id="rPcs" ${r.unit === "pcs" ? "checked" : ""}> Считать в штуках (бургеры, чебуреки: «всего на блюдо» — число штук)</label>
       <div class="row"><button class="btn" id="rDup">Копия рецепта</button><button class="btn" id="rAsProd">${usedBy.length ? "" : "Использовать как продукт в других рецептах"}</button>
         <span class="grow"></span><button class="btn danger" id="rDel">Удалить рецепт</button></div>`;
@@ -650,6 +659,17 @@ function viewRecipe(v, r0rec) {
     $("#rAdd").onclick = () => { r.items.push({ pid: null, name: "", g: 0 }); mark(); draw(); v.querySelector(`[data-name="${r.items.length - 1}"]`)?.focus(); };
     $("#rCooked").onchange = e => { r.cooked = n(e.target.value); mark(); keepFocus(() => draw(), e.target); };
     $("#rPcs").onchange = e => { r.unit = e.target.checked ? "pcs" : "g"; mark(); draw(); };
+    $("#rNote").oninput = e => { r.note = e.target.value; mark(); };
+    const tried = $("#rTried"); if (tried) tried.onclick = async () => {
+      // продукты «из ролика» — в базу, чтобы рецепт считался как остальные
+      for (const it of r.items) {
+        if (!it.name || itemProduct(it) || it.kcal == null || it.kcal === "") continue;
+        const p = { id: uid("p"), name: it.name, kcal: +it.kcal, p: +it.p || 0, f: +it.f || 0, c: +it.c || 0, cat: it.cat || "Прочее", source: "тикток", recipe_id: null };
+        await save("products", p); it.pid = p.id;
+      }
+      r.meal = $("#rMoveTo").value; r.sort = 999;
+      await save("recipes", r); dirty = false; toast("Перенесено в «" + RMEALS[r.meal] + "»"); draw();
+    };
     $("#rSave").onclick = async () => { r.items = r.items.filter(it => it.name || it.g); await save("recipes", r); dirty = false; toast("Сохранено"); draw(); };
     $("#rDup").onclick = async () => { const c2 = { ...JSON.parse(JSON.stringify(r)), id: uid("r"), title: r.title + " (копия)" }; await save("recipes", c2); S.openRecipe = c2.id; render(); };
     const ap = $("#rAsProd"); if (ap) ap.onclick = async () => { await save("recipes", r); await save("products", { id: uid("p"), name: r.title, cat: "Прочее", recipe_id: r.id, source: "из рецепта" }); toast("Добавлен продукт «" + r.title + "»"); draw(); };
